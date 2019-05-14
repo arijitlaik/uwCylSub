@@ -10,13 +10,14 @@ import glucifer
 import numpy as np
 import collections
 import xml.etree.ElementTree as elementTree
+
 # %%
 # turnables
 wholeMantleFlag = False
 airLayer = True
 gldbFlag = False
 # restartFlag = True
-outputDirName = "AnnSubBenchmark_SA_MeshProj"
+outputDirName = "AnnSubBenchmark_SA_MeshProj_CompAir_1e3_free"
 # outputDirName = "T_SA_Lo_dot001"
 # %%
 outputDir = os.path.join(os.path.abspath("."), outputDirName + "/")
@@ -311,13 +312,42 @@ class LayerCircle(fn.Function):
         )
         super(LayerCircle, self).__init__(argument_fns=None)
         self._fncself = self._fn._fncself
+
+
 # %%
 # SH*T GETS REAL HERE
+class sideofCircle(fn.Function):
+    """Layer Circle"""
+
+    def __init__(self, c1, r1):
+        """Create an Layer with two Circles
+        Parameters
+        ----------
+        c1 : center of Internal Circle
+        c2 : center of External Circle
+        r1 : Internal radius
+        r2 : External radius
+        Returns
+        -------
+        An Underworld function(fn) object
+        """
+        self.r1 = r1
+        self.r2 = r2
+
+        coord1 = fn.input() - c1
+        self._fn = fn.math.dot(coord1, coord1) > r1 ** 2
+        super(sideofCircle, self).__init__(argument_fns=None)
+        self._fncself = self._fn._fncself
 
 
 if restartFlag is False:
 
     air = mesh.unit_heightFn.evaluate(swarm.data) > nd(modelHeight - airHeight)
+    compair = (
+        mesh.unit_heightFn.evaluate(swarm.data)
+        < nd(modelHeight - 2.0 * airHeight / 3.0)
+    ) & (mesh.unit_heightFn.evaluate(swarm.data) > nd(modelHeight - airHeight))
+
     lowermantle = mesh.unit_heightFn.evaluate(swarm.data) < nd(
         modelHeight - airHeight - 660.0 * u.kilometer
     )
@@ -348,10 +378,24 @@ if restartFlag is False:
     perturb = (LayerCircle(cI, cE, rI, rE).evaluate(swarm)) & (
         mesh.thetaFn.evaluate(swarm) < np.deg2rad(92.1)
     )
+
+    r2 = nd(earthRadius - airHeight)
+    d2 = 29
+    t2 = -16.216217
+    r2e = nd(r2) / np.cos(np.deg2rad(d2))
+    c2 = (
+        r2 * np.tan(np.deg2rad(d2)) * -np.sin(np.deg2rad(t2 - 90)),
+        r2 * np.tan(np.deg2rad(d2)) * np.sin(np.deg2rad(t2)),
+    )
+
+    rightEdge = sideofCircle(c2, r2e).evaluate(swarm)
+
     materialVariable.data[:] = 1
     materialVariable.data[lowermantle] = 2
-    materialVariable.data[slab | perturb] = 3
-    materialVariable.data[air] = 0  # best at last
+    materialVariable.data[(slab | perturb) & rightEdge] = 3
+    materialVariable.data[air] = 0
+    materialVariable.data[compair] = 4
+
 # SH*T GETS OKAY AGAIN
 # %%
 figP = glucifer.Figure(store=store, figsize=(1200, 450))
@@ -360,7 +404,7 @@ figP.append(
     glucifer.objects.Points(
         swarm,
         materialVariable,
-        colours="#00CED1 #F0E68C #FFA500 #2F4F4F",
+        colours="#00CED1 #F0E68C #FFA500 #2F4F4F #D3D3D3",
         pointsize=2,
         discrete=True,
     )
@@ -417,7 +461,13 @@ airDensity = nd(1.0 * u.kilogram / u.meter ** 3)
 mantleDensity = nd(3200.0 * u.kilogram / u.meter ** 3)  # shit went crazy again
 slabDensity = nd(3280.0 * u.kilogram / u.meter ** 3)
 
-densityMap = {0: airDensity, 1: mantleDensity, 2: mantleDensity, 3: slabDensity}
+densityMap = {
+    4: airDensity,
+    0: airDensity,
+    1: mantleDensity,
+    2: mantleDensity,
+    3: slabDensity,
+}
 densityFn = fn.branching.map(fn_key=materialVariable, mapping=densityMap)
 swarmBuoyancyFn = -nd(gravity) * densityFn * mesh.unitvec_r_Fn
 projDensityMesh = uw.utils.MeshVariable_Projection(densityField, densityFn, type=0)
@@ -447,6 +497,7 @@ mantleViscosity = 1.0
 lowermantleViscosity = 1e2
 slabViscosity = 5e2
 viscosityMap = {
+    4: airViscosity,
     0: airViscosity,
     1: mantleViscosity,
     2: lowermantleViscosity,
@@ -482,6 +533,8 @@ if restartFlag is False:
         prefix=outputDir,
     )
 
+oneonlambdaMap = {4: 1e4, 0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0}
+oneonlambdaFn = fn.branching.map(fn_key=materialVariable, mapping=oneonlambdaMap)
 # %%
 stokesSLE = uw.systems.Stokes(
     velocityField,
@@ -490,6 +543,7 @@ stokesSLE = uw.systems.Stokes(
     fn_bodyforce=meshBuoyancyField,
     conditions=freeSlipAn,
     _removeBCs=False,
+    fn_one_on_lambda=oneonlambdaFn,
 )
 
 
@@ -504,7 +558,7 @@ stokesSolverAN.options.scr.ksp_type = "fgmres"
 stokesSolverAN.options.A11.ksp_rtol = 1.0e-5
 # stokesSolverAN.options.A11.ksp_monitor = "ascii"
 
-stokesSolverAN.set_penalty(100.0)
+# stokesSolverAN.set_penalty(100.0)
 stokesSolverAN.options.main.restore_K = True
 stokesSolverAN.options.main.force_correction = True
 stokesSolverAN.options.main.Q22_pc_type = "gkgdiag"
